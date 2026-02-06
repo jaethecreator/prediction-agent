@@ -202,6 +202,26 @@ app.get('/stats', (req, res) => {
 });
 
 /**
+ * GET / - Root endpoint
+ */
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Prediction Agent Signal Hub',
+    version: '0.1.0',
+    endpoints: [
+      'POST /subscribe - Register for topic signals',
+      'POST /signal - Broadcast a prediction signal',
+      'GET /signals - View recent signals',
+      'GET /stats - Hub statistics',
+      'GET /health - Health check'
+    ],
+    topics: TOPICS,
+    built_for: 'Circle USDC & Colosseum Hackathons',
+    author: 'Hermes ⚡'
+  });
+});
+
+/**
  * GET /health
  */
 app.get('/health', (req, res) => {
