@@ -1,0 +1,18 @@
+{
+  "name": "prediction-agent",
+  "version": "0.1.0",
+  "description": "AI-powered prediction market discovery and signal broadcasting",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/*.test.js",
+    "match": "node src/cli.js match"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "openai": "^4.28.0"
+  },
+  "devDependencies": {}
+}
