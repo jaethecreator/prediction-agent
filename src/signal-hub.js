@@ -364,3 +364,26 @@ export function startHub() {
 
 // Auto-start when run directly
 startHub();
+
+// Start auto signal generator after a brief delay
+setTimeout(async () => {
+  try {
+    const { generateSignals } = await import('./auto-signals.js');
+    
+    // Generate initial signals
+    console.log('[AUTO] Generating initial signals...');
+    await generateSignals(5);
+    
+    // Then every 5 minutes
+    setInterval(async () => {
+      try {
+        await generateSignals(2);
+      } catch (e) {
+        console.error('[AUTO] Interval error:', e.message);
+      }
+    }, 5 * 60 * 1000);
+    
+  } catch (e) {
+    console.error('[AUTO] Failed to start auto signals:', e.message);
+  }
+}, 5000);
