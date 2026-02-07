@@ -9,17 +9,19 @@
 
 import express from 'express';
 import crypto from 'node:crypto';
+import { loadSignals, loadProviderStats, debouncedSaveSignals, debouncedSaveProviders } from './persistence.js';
 
 const app = express();
 app.use(express.json());
 
-// In-memory storage (swap for Redis/DB in production)
-const subscribers = new Map();  // topic -> Set<{agentId, webhookUrl}>
-const signals = [];             // Recent signals (ring buffer)
-const MAX_SIGNALS = 1000;
+// Load persisted data on startup
+const signals = loadSignals();
+const providerStats = loadProviderStats();
+console.log(`[PERSIST] Loaded ${signals.length} signals, ${providerStats.size} providers`);
 
-// Provider reputation and dedup state
-const providerStats = new Map(); // agentId -> { sent, delivered, failures, duplicates, uniqueSignals, score }
+// In-memory storage
+const subscribers = new Map();  // topic -> Set<{agentId, webhookUrl}>
+const MAX_SIGNALS = 1000;
 const recentHashes = new Map();  // hash -> { signalId, topic, firstAt, providers: Set<agentId> }
 const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -188,6 +190,9 @@ app.post('/signal', async (req, res) => {
   // Track dedup hash
   recentHashes.set(hash, { signalId: signal.id, topic, firstAt: now, providers: new Set([agentId]) });
   
+  // Persist signals
+  debouncedSaveSignals(signals);
+  
   // Broadcast to subscribers
   const topicsToNotify = [topic];
   if (topic !== 'all') topicsToNotify.push('all');
@@ -229,6 +234,9 @@ app.post('/signal', async (req, res) => {
   stats.failures += failures.length;
   stats.uniqueSignals += 1;
   recalcScore(stats);
+  
+  // Persist provider stats
+  debouncedSaveProviders(providerStats);
 
   console.log(`[SIGNAL] ${agentId} published to ${topic}: ${markets.length} markets, ${delivered} delivered (score=${stats.score})`);
   
@@ -289,6 +297,38 @@ app.post('/match', async (req, res) => {
 });
 
 /**
+ * GET /markets
+ * Browse active prediction markets from Polymarket
+ * Query: ?topic=crypto&limit=20&sort=volume|newest&q=search
+ */
+app.get('/markets', async (req, res) => {
+  try {
+    const { fetchMarkets, searchMarkets } = await import('./markets.js');
+    const { topic, limit = 30, sort = 'volume', q } = req.query;
+    
+    let markets;
+    if (q) {
+      markets = await searchMarkets(q);
+    } else {
+      markets = await fetchMarkets({ 
+        topic: topic || null, 
+        limit: parseInt(limit), 
+        sort 
+      });
+    }
+    
+    res.json({
+      count: markets.length,
+      topic: topic || 'all',
+      markets
+    });
+  } catch (e) {
+    console.error('[MARKETS] Error:', e.message);
+    res.status(500).json({ error: 'Failed to fetch markets', detail: e.message });
+  }
+});
+
+/**
  * GET /reputation
  * Return provider reputation stats (optionally filter by agentId)
  */
@@ -322,22 +362,37 @@ app.get('/dashboard', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'Prediction Agent Signal Hub',
-    version: '0.2.0',
-    endpoints: [
-      'GET /dashboard - Visual dashboard',
-      'POST /subscribe - Register for topic signals',
-      'POST /signal - Broadcast a prediction signal',
-      'GET /signals - View recent signals',
-      'GET /stats - Hub statistics',
-      'GET /reputation - Provider leaderboard',
-      'GET /health - Health check'
-    ],
+    version: '0.3.0',
+    description: 'AI-to-AI prediction market signals with revenue sharing',
+    endpoints: {
+      browse: [
+        'GET /dashboard - Visual dashboard',
+        'GET /markets - Browse active prediction markets',
+        'GET /signals - View recent signals',
+        'GET /stats - Hub statistics + top providers',
+        'GET /reputation - Provider leaderboard'
+      ],
+      publish: [
+        'POST /signal - Broadcast a prediction signal',
+        'POST /subscribe - Register for topic webhooks',
+        'POST /unsubscribe - Remove subscriptions'
+      ],
+      system: [
+        'GET /health - Health check'
+      ]
+    },
     topics: TOPICS,
     referral: {
       account: process.env.JUP_REFERRAL_ACCOUNT || null,
       feeBps: parseInt(process.env.JUP_FEE_BPS || '150', 10)
     },
-    built_for: 'Circle USDC & Colosseum Hackathons',
+    features: [
+      'Real-time signal broadcasting via webhooks',
+      'Provider reputation + deduplication',
+      'Jupiter referral integration (owners earn USDC)',
+      'Auto signal generation from trending markets',
+      'Persistent storage across restarts'
+    ],
     author: 'Hermes ⚡'
   });
 });
