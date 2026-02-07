@@ -8,6 +8,7 @@
  */
 
 import express from 'express';
+import crypto from 'node:crypto';
 
 const app = express();
 app.use(express.json());
@@ -17,8 +18,43 @@ const subscribers = new Map();  // topic -> Set<{agentId, webhookUrl}>
 const signals = [];             // Recent signals (ring buffer)
 const MAX_SIGNALS = 1000;
 
+// Provider reputation and dedup state
+const providerStats = new Map(); // agentId -> { sent, delivered, failures, duplicates, uniqueSignals, score }
+const recentHashes = new Map();  // hash -> { signalId, topic, firstAt, providers: Set<agentId> }
+const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 // Valid topics
 const TOPICS = ['politics', 'sports', 'crypto', 'macro', 'culture', 'tech', 'all'];
+
+function normalizeSignalForHash({ topic, markets = [], keywords = [] }) {
+  const slugs = (markets || [])
+    .map(m => m.slug || m.predictionSlug || (m.title || m.question || ''))
+    .filter(Boolean)
+    .map(s => s.toString().toLowerCase().trim())
+    .sort();
+  const kws = (keywords || [])
+    .map(k => k.toString().toLowerCase().trim())
+    .sort();
+  const payload = JSON.stringify({ topic: (topic||'').toLowerCase(), slugs, kws });
+  return crypto.createHash('sha1').update(payload).digest('hex');
+}
+
+function ensureProvider(agentId) {
+  if (!providerStats.has(agentId)) {
+    providerStats.set(agentId, { sent: 0, delivered: 0, failures: 0, duplicates: 0, uniqueSignals: 0, score: 0 });
+  }
+  return providerStats.get(agentId);
+}
+
+function recalcScore(stats) {
+  // Simple heuristic: deliveries matter, failures penalize, duplicates penalize more
+  stats.score = Math.max(0,
+    stats.delivered * 2 +
+    stats.uniqueSignals * 1 -
+    stats.failures * 1 -
+    stats.duplicates * 2
+  );
+}
 
 /**
  * POST /subscribe
@@ -106,6 +142,18 @@ app.post('/signal', async (req, res) => {
   if (!TOPICS.includes(topic)) {
     return res.status(400).json({ error: `Invalid topic. Valid: ${TOPICS.join(', ')}` });
   }
+
+  // Deduplicate within a short window to prevent spam/manipulation
+  const hash = normalizeSignalForHash({ topic, markets, keywords });
+  const now = Date.now();
+  const existing = recentHashes.get(hash);
+  if (existing && (now - existing.firstAt) <= DEDUP_WINDOW_MS) {
+    const stats = ensureProvider(agentId);
+    stats.duplicates += 1;
+    recalcScore(stats);
+    console.log(`[DEDUP] ${agentId} duplicate of ${existing.signalId} (topic=${topic})`);
+    return res.json({ ok: true, duplicateOf: existing.signalId, dedupWindowSec: Math.floor((DEDUP_WINDOW_MS - (now - existing.firstAt))/1000) });
+  }
   
   const signal = {
     id: `sig_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -118,10 +166,27 @@ app.post('/signal', async (req, res) => {
     keywords,
     confidence,
   };
+
+  // Append referral attribution params to Jupiter URLs when available
+  try {
+    const { buildJupiterUrl } = await import('./referral.js');
+    signal.markets = signal.markets.map(m => {
+      if (m.slug || m.predictionSlug || m.jupiterUrl) {
+        const slug = m.slug || m.predictionSlug || (m.jupiterUrl?.split('/prediction/')[1] || '').split('?')[0];
+        const url = buildJupiterUrl(slug, { signalId: signal.id, providerAgentId: agentId });
+        return { ...m, jupiterUrl: url };
+      }
+      return m;
+    });
+  } catch (e) {
+    console.warn('Referral URL build skipped:', e.message);
+  }
   
   // Store signal
   signals.push(signal);
   if (signals.length > MAX_SIGNALS) signals.shift();
+  // Track dedup hash
+  recentHashes.set(hash, { signalId: signal.id, topic, firstAt: now, providers: new Set([agentId]) });
   
   // Broadcast to subscribers
   const topicsToNotify = [topic];
@@ -157,13 +222,22 @@ app.post('/signal', async (req, res) => {
     }
   }
   
-  console.log(`[SIGNAL] ${agentId} published to ${topic}: ${markets.length} markets, ${delivered} delivered`);
+  // Update provider reputation
+  const stats = ensureProvider(agentId);
+  stats.sent += 1;
+  stats.delivered += delivered;
+  stats.failures += failures.length;
+  stats.uniqueSignals += 1;
+  recalcScore(stats);
+
+  console.log(`[SIGNAL] ${agentId} published to ${topic}: ${markets.length} markets, ${delivered} delivered (score=${stats.score})`);
   
   res.json({
     ok: true,
     signalId: signal.id,
     delivered,
     failures: failures.length ? failures : undefined,
+    providerScore: stats.score,
   });
 });
 
@@ -192,6 +266,10 @@ app.get('/stats', (req, res) => {
     totalSignals: signals.length,
     subscribersByTopic: {},
     recentSignals: signals.slice(-5).reverse(),
+    topProviders: [...providerStats.entries()]
+      .map(([agentId, s]) => ({ agentId, ...s }))
+      .sort((a,b) => b.score - a.score)
+      .slice(0, 10)
   };
   
   for (const [topic, subs] of subscribers) {
@@ -199,6 +277,29 @@ app.get('/stats', (req, res) => {
   }
   
   res.json(stats);
+});
+
+/**
+ * POST /match (planned)
+ * Accept raw content and return matched markets (uses market-matcher)
+ */
+app.post('/match', async (req, res) => {
+  // Placeholder until OpenAI client wiring is added
+  res.status(501).json({ error: 'Not implemented yet. Coming soon.' });
+});
+
+/**
+ * GET /reputation
+ * Return provider reputation stats (optionally filter by agentId)
+ */
+app.get('/reputation', (req, res) => {
+  const { agentId } = req.query;
+  if (agentId) {
+    const stats = providerStats.get(agentId) || { sent: 0, delivered: 0, failures: 0, duplicates: 0, uniqueSignals: 0, score: 0 };
+    return res.json({ agentId, ...stats });
+  }
+  const all = [...providerStats.entries()].map(([id, s]) => ({ agentId: id, ...s }));
+  res.json(all.sort((a,b) => b.score - a.score));
 });
 
 /**

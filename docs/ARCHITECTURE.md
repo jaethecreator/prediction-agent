@@ -27,6 +27,9 @@ A discovery layer that connects real-world news to prediction markets, enabling 
 
 ## Components
 
+- Revenue & Incentives: see ./AGENT_INCENTIVES.md
+- Public API: see ./API.md
+
 ### 1. Market Matcher (`market-matcher.js`)
 
 **Purpose:** Extract betting-relevant entities from content and match to active prediction markets.

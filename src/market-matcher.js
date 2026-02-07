@@ -177,6 +177,7 @@ export async function matchContent(content, openai, options = {}) {
       question: m.question,
       outcomePrices: m.outcomePrices, // YES/NO prices
     })),
+    // TODO: append referral params & signal/agent attribution when available
     jupiterUrl: `https://jup.ag/prediction/${event.slug}`,
     polymarketUrl: `https://polymarket.com/event/${event.slug}`,
   }));
