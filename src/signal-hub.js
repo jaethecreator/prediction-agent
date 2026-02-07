@@ -368,16 +368,63 @@ startHub();
 // Start auto signal generator after a brief delay
 setTimeout(async () => {
   try {
-    const { generateSignals } = await import('./auto-signals.js');
+    const { generateSignalsInternal } = await import('./auto-signals.js');
+    
+    // Pass the internal signal handler
+    const postSignal = async (signal) => {
+      // Simulate the /signal endpoint logic inline
+      const { agentId, topic, markets, sourceUrl, sourceTitle, keywords, confidence } = signal;
+      if (!agentId || !topic || !markets?.length) return { error: 'missing fields' };
+      
+      const hash = normalizeSignalForHash({ topic, markets, keywords });
+      const now = Date.now();
+      const existing = recentHashes.get(hash);
+      if (existing && (now - existing.firstAt) <= DEDUP_WINDOW_MS) {
+        const stats = ensureProvider(agentId);
+        stats.duplicates += 1;
+        recalcScore(stats);
+        return { ok: true, duplicateOf: existing.signalId };
+      }
+      
+      const sig = {
+        id: `sig_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
+        agentId, topic,
+        markets: markets.slice(0, 5),
+        sourceUrl, sourceTitle, keywords, confidence
+      };
+      
+      // Add referral URLs
+      try {
+        const { buildJupiterUrl } = await import('./referral.js');
+        sig.markets = sig.markets.map(m => {
+          if (m.slug) {
+            return { ...m, jupiterUrl: buildJupiterUrl(m.slug, { signalId: sig.id, providerAgentId: agentId }) };
+          }
+          return m;
+        });
+      } catch (e) {}
+      
+      signals.push(sig);
+      if (signals.length > MAX_SIGNALS) signals.shift();
+      recentHashes.set(hash, { signalId: sig.id, topic, firstAt: now, providers: new Set([agentId]) });
+      
+      const stats = ensureProvider(agentId);
+      stats.sent += 1;
+      stats.uniqueSignals += 1;
+      recalcScore(stats);
+      
+      return { ok: true, signalId: sig.id };
+    };
     
     // Generate initial signals
     console.log('[AUTO] Generating initial signals...');
-    await generateSignals(5);
+    await generateSignalsInternal(5, postSignal);
     
     // Then every 5 minutes
     setInterval(async () => {
       try {
-        await generateSignals(2);
+        await generateSignalsInternal(2, postSignal);
       } catch (e) {
         console.error('[AUTO] Interval error:', e.message);
       }

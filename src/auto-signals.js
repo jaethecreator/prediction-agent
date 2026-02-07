@@ -100,6 +100,52 @@ export async function generateSignals(count = 3) {
   return results;
 }
 
+// Internal version that accepts a postSignal callback (used by signal-hub directly)
+export async function generateSignalsInternal(count = 3, postSignal) {
+  console.log('[AUTO] Fetching trending markets...');
+  const events = await fetchTrendingMarkets();
+  
+  const results = [];
+  const used = new Set();
+  
+  for (const event of events.slice(0, count * 2)) {
+    if (results.length >= count) break;
+    
+    const title = event.title || '';
+    const topic = detectTopic(title);
+    const keywords = extractKeywords(title + ' ' + (event.description || ''));
+    
+    // Skip if we already did this topic this round
+    if (used.has(topic) && results.length > 0) continue;
+    used.add(topic);
+    
+    const signal = {
+      agentId: 'signal-bot',
+      topic,
+      sourceUrl: `https://polymarket.com/event/${event.slug}`,
+      sourceTitle: title,
+      keywords: keywords.length ? keywords : [topic],
+      confidence: Math.min(0.95, 0.6 + (parseFloat(event.volume24hr || 0) / 1000000) * 0.1),
+      markets: [{
+        slug: event.slug,
+        title: title,
+        volume24hr: event.volume24hr,
+        liquidity: event.liquidity
+      }]
+    };
+    
+    try {
+      const result = await postSignal(signal);
+      console.log(`[AUTO] Published: ${topic} - ${title.slice(0, 50)}... (${result.signalId || result.duplicateOf || 'ok'})`);
+      results.push(result);
+    } catch (e) {
+      console.error(`[AUTO] Failed: ${e.message}`);
+    }
+  }
+  
+  return results;
+}
+
 // Run on interval if executed directly
 const INTERVAL_MS = parseInt(process.env.AUTO_SIGNAL_INTERVAL_MS || '300000', 10); // 5 min default
 
